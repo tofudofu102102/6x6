@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CPU vs プレイヤー — カード対戦</title>
+<style>
+  :root{--bg:#0f1724;--card:#111827;--accent:#06b6d4;--muted:#94a3b8;--win:#10b981}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"ヒラギノ角ゴ ProN",Meiryo, sans-serif;background:linear-gradient(180deg,#041124 0%,var(--bg) 100%);color:#e6eef6;display:flex;align-items:center;justify-content:center;height:100vh;padding:20px;box-sizing:border-box}
+  /* grid layout: single-column vertical layout (log -> cpu hand -> main -> player hand) */
+  .board{width:100%;max-width:520px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.04);border-radius:12px;padding:18px;box-shadow:0 8px 30px rgba(2,6,23,0.6);display:grid;grid-template-columns:1fr;grid-template-rows:auto auto 1fr auto;grid-template-areas:"log" "cpuhand" "main" "playerhand";gap:12px}
+  h1{margin:0 0 12px;font-size:20px}
+  .row{display:flex;gap:16px;flex-wrap:wrap}
+  /* パネルを縦レイアウトにして、下部の capture が伸縮するようにする */
+  .panel{flex:1;min-width:220px;background:rgba(255,255,255,0.02);padding:14px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);display:flex;flex-direction:column;gap:8px}
+  .hand{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  /* card wrapper that holds an image */
+  .card{background:transparent;padding:0;border-radius:8px;min-width:56px;cursor:pointer;user-select:none}
+  .card.disabled{opacity:0.35;cursor:not-allowed}
+  .card-img{width:56px;height:80px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,0.04);display:block}
+  .card-back{width:44px;height:64px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,0.02)}
+  /* キャプチャ領域は固定高さにしてスクロール可能にする */
+  .panel .capture{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;flex:1 1 auto;min-height:84px;max-height:140px;overflow:auto;align-content:flex-start}
+  .mini{background:#071426;padding:6px 8px;border-radius:6px;font-size:13px;color:var(--muted);border:1px solid rgba(255,255,255,0.02);display:flex;align-items:center;gap:6px}
+  /* ミニ要素は幅を揃えて行の増減でパネルが崩れないようにする */
+  .mini{flex:0 0 48%;box-sizing:border-box}
+  .mini img{width:36px;height:52px;object-fit:cover;border-radius:4px;flex:0 0 auto}
+  .score{font-size:18px;font-weight:700;color:var(--accent)}
+  .controls{display:flex;gap:8px;align-items:center;margin-top:12px}
+  button{background:var(--accent);border:0;color:#07202a;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted)}
+  .log{max-height:220px;overflow:auto;margin-top:10px;padding:8px;background:rgba(0,0,0,0.14);border-radius:8px;font-size:13px;color:var(--muted)}
+  .result{margin-top:12px;padding:10px;border-radius:8px;background:linear-gradient(90deg, rgba(1,10,18,0.4), rgba(4,8,15,0.2));display:flex;justify-content:space-between;align-items:center}
+  .winner{color:var(--win);font-weight:800}
+  .tie{color:var(--muted);font-weight:700}
+  footer{margin-top:12px;font-size:13px;color:var(--muted)}
+  .playArea{display:flex;gap:36px;align-items:center;justify-content:center;margin-top:12px}
+  .playSlot{text-align:center;color:var(--muted)}
+  /* カードサイズを変数化（デスクトップ / モバイルで上書き） */
+  :root{
+    --play-card-w:112px;
+    --play-card-h:160px;
+  }
+  /* larger play-area card (2x) */
+  .play-card{
+    width:var(--play-card-w);
+    height:var(--play-card-h);
+    object-fit:cover;border-radius:8px;border:2px solid rgba(255,255,255,0.06)
+  }
+  /* slot-box: プレイ前後で領域を固定するための枠 */
+  .slot-box{width:var(--play-card-w);height:var(--play-card-h);border-radius:8px;border:2px dashed rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.01);box-sizing:border-box;position:relative;overflow:visible}
+  .slot-box.empty{opacity:0.18}
+  /* 負けカード上に出す × オーバーレイ */
+  .loser-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;opacity:0;transform:scale(0.8);transition:opacity 260ms ease, transform 260ms cubic-bezier(.2,.9,.2,1)}
+  .loser-overlay.show{opacity:1;transform:scale(1)}
+  /* × をカード高さの110%にする（可変対応） */
+  .loser-overlay .mark{
+    /* 既存の 1.1 倍 をさらに 1.5 倍する → 合計 1.65 倍 */
+    font-size: calc(var(--play-card-h) * 1.65);
+    line-height:1;
+    /* 透明度を 50% に設定 */
+    color: rgba(255,80,80,0.5);
+    text-shadow:0 4px 18px rgba(0,0,0,0.6);
+    transform: translateZ(0);
+  }
+  /* visible cpu hand top */
+  .cpu-hand-row{grid-area:cpuhand;display:flex;gap:10px;align-items:center;justify-content:center;padding:6px 8px}
+  /* player hand area */
+  .player-hand-row{grid-area:playerhand;display:flex;gap:10px;align-items:center;justify-content:center;padding:6px 8px}
+  /* main center area */
+  .main-area{grid-area:main;display:flex;gap:16px;align-items:flex-start;flex-direction:column;align-items:center}
+  /* log column */
+  .log-panel{grid-area:log;padding:8px}
+  /* mobile: single-column vertical layout */
+  @media (max-width:600px) {
+    /* モバイルではカードサイズ変数を上書き */
+    :root{--play-card-w:84px;--play-card-h:120px}
+    .board{grid-template-columns:1fr;grid-template-rows:auto auto 1fr auto;grid-template-areas:"log" "cpuhand" "main" "playerhand";max-width:420px;padding:12px}
+    .main-area{flex-direction:column;align-items:center}
+    .playArea{gap:18px}
+    .card-img{width:48px;height:68px}
+    .playArea .playSlot{display:flex;flex-direction:column;align-items:center}
+    .cpu-hand-row,.player-hand-row{justify-content:center}
+    .log-panel{padding:6px}
+  }
+
+  /* final overlay: 大きな勝敗表示 */
+  .final-overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(2,6,23,0.72);z-index:60}
+  .final-overlay.show{display:flex}
+  .final-content{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:28px;border-radius:12px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,0.6);min-width:320px;max-width:90%}
+  .final-title{font-size:36px;font-weight:900;line-height:1;color:#fff;margin-bottom:8px}
+  .final-title .winner{color:var(--win)}
+  .final-title .loser{color:#f97316}
+  .final-subtitle{font-size:18px;color:var(--muted);margin-bottom:14px}
+  .final-actions{display:flex;gap:8px;justify-content:center}
+  .final-actions button{padding:10px 14px;border-radius:8px;font-weight:800}
+
+  /* clone 用スタイル */
+  .moving-clone{position:fixed;z-index:9999;pointer-events:none;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,0.6);transition:all 360ms cubic-bezier(.2,.8,.2,1)}
+
+  /* 下部スコアバー */
+  .bottom-score{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,255,255,0.02);color:var(--muted)}
+  .bottom-score .left{font-weight:700}
+  .bottom-score .right{font-weight:700}
+</style>
+</head>
+<body>
+  <div class="board">
+    <h1 style="margin:0 0 10px;text-align:center">CPU vs プレイヤー — カード対戦</h1>
+
+    <!-- 対戦ログ + コントロール（画面上部、CPU手札の上に表示） -->
+    <div class="log-panel" style="padding:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <div style="font-weight:700">対戦ログ</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div style="font-size:13px;color:var(--muted)">残り - あなた: <span id="playerRemain">6</span> / CPU: <span id="cpuRemain">6</span></div>
+          <button id="restart">リスタート</button>
+          <button id="autoPlay" class="ghost">自動プレイ</button>
+        </div>
+      </div>
+      <div class="log" id="log"></div>
+      <div class="result" id="resultRow" style="display:none">
+        <div id="resultText"></div>
+      </div>
+      <footer>ルール：1〜6のカードをそれぞれ6枚所持。毎ターン1枚ずつ出し高い数字の人が両方のカードを獲得。引き分けは両カード破棄。</footer>
+    </div>
+
+    <!-- CPU手札（ログの下） -->
+    <div class="cpu-hand-row" id="cpuHandVisual" aria-label="CPUの手札" style="margin-bottom:6px"></div>
+
+    <!-- Main center column: play area, player hand (stacked) -->
+    <div class="main-area">
+      <!-- Play area (center) -->
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <div class="playArea">
+          <div class="playSlot">
+            <div style="font-size:13px;color:var(--muted)">あなたの出したカード</div>
+            <!-- slot-box を常に置く（中身は JS で差し替え） -->
+            <div id="lastPlayerPlayed"></div>
+          </div>
+          <div class="playSlot">
+            <div style="font-size:13px;color:var(--muted)">CPUの出したカード</div>
+            <div id="lastCpuPlayed"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Player hand at bottom of center column -->
+      <div style="margin-top:12px">
+        <div class="hand" id="playerHand"></div>
+      </div>
+
+      <!-- Panels showing captured and score moved under the central column for clarity -->
+      <div style="display:flex;gap:12px;margin-top:12px;align-items:flex-start">
+        <div class="panel" id="cpuPanel" style="min-width:160px;flex:0 0 auto">
+          <div style="font-size:14px;color:var(--muted)">CPU</div>
+          <div class="score" id="cpuScore">得点: 0</div>
+          <div style="margin-top:8px;color:var(--muted)">CPUの獲得カード</div>
+          <div class="capture" id="cpuCaptured"></div>
+        </div>
+        <div class="panel" id="playerPanel" style="min-width:160px;flex:0 0 auto">
+          <div style="font-size:14px;color:var(--muted)">あなた</div>
+          <div class="score" id="playerScore">得点: 0</div>
+          <div style="margin-top:8px;color:var(--muted)">獲得したカード</div>
+          <div class="capture" id="playerCaptured"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 最終結果オーバーレイ（中央に大きく表示） -->
+  <div id="finalOverlay" class="final-overlay" aria-hidden="true">
+    <div class="final-content" role="dialog" aria-modal="true">
+      <div id="finalTitle" class="final-title"></div>
+      <div id="finalSubtitle" class="final-subtitle"></div>
+      <div class="final-actions">
+        <button id="finalRestart">リスタート</button>
+        <button id="finalClose" class="ghost">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 音声リソース -->
+  <audio id="sndWin" src="1win.wav" preload="auto"></audio>
+  <audio id="sndLose" src="1lose.wav" preload="auto"></audio>
+  <audio id="sndDraw" src="1draw.wav" preload="auto"></audio>
+  <audio id="sndFinDraw" src="fin_draw.wav" preload="auto"></audio>
+  <audio id="sndFinWin" src="fin_win.wav" preload="auto"></audio>
+  <audio id="sndFinLose" src="fin_lose.wav" preload="auto"></audio>
+
+<script>
+  // ゲーム状態
+  let playerHand = [], cpuHand = [], playerCaptured = [], cpuCaptured = [];
+  // lastOutcome: 負けた側を示す ('player' | 'cpu' | 'both' | null)
+  let lastOutcome = null;
+  let autoPlaying = false;
+  let lastPlayerCard = null, lastCpuCard = null;
+
+  // ログを配列で保持（DOM が再構築されても消えないようにする）
+  let logs = [];
+
+  function init() {
+    playerHand = [1,2,3,4,5,6];
+    cpuHand = [1,2,3,4,5,6];
+    playerCaptured = [];
+    cpuCaptured = [];
+    autoPlaying = false;
+    lastPlayerCard = null; lastCpuCard = null;
+    lastOutcome = null;
+    render();
+    logClear();
+    hideResult();
+  }
+
+  function renderLog() {
+    const lg = document.getElementById('log');
+    if (!lg) return;
+    lg.innerHTML = '';
+    // 最新を上に表示（配列の末尾が最新）
+    for (let i = logs.length - 1; i >= 0; i--) {
+      const d = document.createElement('div');
+      d.textContent = logs[i];
+      lg.appendChild(d);
+    }
+  }
+
+  // ログ追加（配列に追加して表示を更新）
+  function addLog(text){
+    logs.push(text);
+    // 表示は render() の最後でも行うが、即時反映したい場合はここでも更新
+    renderLog();
+  }
+  // ログクリア
+  function logClear(){ logs = []; renderLog(); }
+
+  function render() {
+    // 手札表示（プレイヤーのみ選択可能）
+    const ph = document.getElementById('playerHand');
+    ph.innerHTML = '';
+    playerHand.forEach((v, idx) => {
+      const btn = document.createElement('div');
+      btn.className = 'card';
+      // 識別用データ（render 時に付与）
+      btn.dataset.index = idx;
+      btn.dataset.value = v;
+      const img = document.createElement('img');
+      img.className = 'card-img';
+      img.src = `d${v}.jpg`;
+      img.alt = `d${v}`;
+      btn.appendChild(img);
+      btn.onclick = () => playCard(idx);
+      ph.appendChild(btn);
+    });
+    if (playerHand.length === 0) {
+      const p = document.createElement('div');
+      p.className = 'mini';
+      p.textContent = '手札なし';
+      ph.appendChild(p);
+    }
+
+    // 獲得カード表示
+    const pc = document.getElementById('playerCaptured');
+    pc.innerHTML = '';
+    playerCaptured.forEach(n => {
+      const el = document.createElement('div');
+      el.className = 'mini';
+      const img = document.createElement('img');
+      img.src = `d${n}.jpg`;
+      img.alt = `d${n}`;
+      el.appendChild(img);
+      const span = document.createElement('div');
+      span.textContent = n;
+      el.appendChild(span);
+      pc.appendChild(el);
+    });
+
+    const cc = document.getElementById('cpuCaptured');
+    cc.innerHTML = '';
+    cpuCaptured.forEach(n => {
+      const el = document.createElement('div');
+      el.className = 'mini';
+      const img = document.createElement('img');
+      img.src = `d${n}.jpg`;
+      img.alt = `d${n}`;
+      el.appendChild(img);
+      const span = document.createElement('div');
+      span.textContent = n;
+      el.appendChild(span);
+      cc.appendChild(el);
+    });
+
+    // CPU手札（表向きで表示 — 相手の手札を見えるように）
+    const chv = document.getElementById('cpuHandVisual');
+    if (chv) {
+      chv.innerHTML = '';
+      cpuHand.forEach((v, cidx) => {
+        const el = document.createElement('div');
+        el.className = 'card disabled';
+        el.dataset.index = cidx;
+        el.dataset.value = v;
+        const img = document.createElement('img');
+        img.className = 'card-img';
+        img.src = `d${v}.jpg`;
+        img.alt = `d${v}`;
+        el.appendChild(img);
+        chv.appendChild(el);
+      });
+      if (cpuHand.length === 0) {
+        const p = document.createElement('div');
+        p.className = 'mini';
+        p.textContent = '手札なし';
+        chv.appendChild(p);
+      }
+    }
+
+    // 最後に出したカードを表示（領域は常に確保）
+    const lp = document.getElementById('lastPlayerPlayed');
+    const lc = document.getElementById('lastCpuPlayed');
+    lp.innerHTML = '';
+    lc.innerHTML = '';
+    // プレイヤー側スロット（常に slot-box を配置）
+    const slotP = document.createElement('div');
+    slotP.className = 'slot-box' + (lastPlayerCard == null ? ' empty' : '');
+    if (lastPlayerCard != null) {
+      const img = document.createElement('img');
+      img.className = 'play-card';
+      img.src = `d${lastPlayerCard}.jpg`;
+      slotP.appendChild(img);
+    }
+    // 負けた側のオーバーレイを追加（lastOutcome による）
+    const overlayP = document.createElement('div');
+    overlayP.className = 'loser-overlay' + (lastOutcome === 'player' || lastOutcome === 'both' ? ' show' : '');
+    overlayP.innerHTML = '<div class="mark">×</div>';
+    slotP.appendChild(overlayP);
+    lp.appendChild(slotP);
+    // CPU側スロット
+    const slotC = document.createElement('div');
+    slotC.className = 'slot-box' + (lastCpuCard == null ? ' empty' : '');
+    if (lastCpuCard != null) {
+      const img2 = document.createElement('img');
+      img2.className = 'play-card';
+      img2.src = `d${lastCpuCard}.jpg`;
+      slotC.appendChild(img2);
+    }
+    const overlayC = document.createElement('div');
+    overlayC.className = 'loser-overlay' + (lastOutcome === 'cpu' || lastOutcome === 'both' ? ' show' : '');
+    overlayC.innerHTML = '<div class="mark">×</div>';
+    slotC.appendChild(overlayC);
+    lc.appendChild(slotC);
+
+    // 得点と残り
+    document.getElementById('playerScore').textContent = '得点: ' + sum(playerCaptured);
+    document.getElementById('cpuScore').textContent = '得点: ' + sum(cpuCaptured);
+    // 残り表示（要素が存在する場合のみ）
+    const pr = document.getElementById('playerRemain');
+    const cr = document.getElementById('cpuRemain');
+    if (pr) pr.textContent = playerHand.length;
+    if (cr) cr.textContent = cpuHand.length;
+
+    // 再描画の最後にログを描画（ログ配列から）
+    renderLog();
+
+    // 無効化 / ゲーム終了時UI
+    if (playerHand.length === 0) {
+      // 終了
+      showResult();
+    }
+  }
+
+  function sum(arr){ return arr.reduce((a,b)=>a+b,0); }
+
+  // DOM 要素の矩形取得ヘルパ
+  function getRect(el){
+    return el ? el.getBoundingClientRect() : null;
+  }
+
+  // 画像を固定配置して移動アニメを行う。fromRect/toRect は DOMRect、cloneSizeTo は true なら toRect に合わせる。
+  function animateMoveImage(imgSrc, fromRect, toRect){
+    return new Promise(resolve => {
+      const clone = document.createElement('img');
+      clone.src = imgSrc;
+      clone.className = 'moving-clone';
+      // 初期位置とサイズを set
+      clone.style.left = fromRect.left + 'px';
+      clone.style.top = fromRect.top + 'px';
+      clone.style.width = fromRect.width + 'px';
+      clone.style.height = fromRect.height + 'px';
+      clone.style.opacity = '1';
+      document.body.appendChild(clone);
+      // 強制 reflow -> トランジション適用
+      requestAnimationFrame(() => {
+        clone.style.left = toRect.left + 'px';
+        clone.style.top = toRect.top + 'px';
+        clone.style.width = toRect.width + 'px';
+        clone.style.height = toRect.height + 'px';
+      });
+      // 完了検知
+      const finish = () => {
+        clone.removeEventListener('transitionend', finish);
+        if (clone.parentNode) clone.parentNode.removeChild(clone);
+        resolve();
+      };
+      clone.addEventListener('transitionend', finish);
+      // フォールバック: タイムアウト
+      setTimeout(() => {
+        if (document.body.contains(clone)) {
+          clone.parentNode.removeChild(clone);
+          resolve();
+        }
+      }, 600);
+    });
+  }
+
+  // 音声再生ヘルパ（存在チェックと再生エラーは黙殺）
+  function playSound(id){
+    try {
+      const a = document.getElementById(id);
+      if (!a) return;
+      a.currentTime = 0;
+      const p = a.play();
+      if (p && p.then) p.catch(()=>{/* 再生拒否は無視 */});
+    } catch(e){
+      // 無視
+    }
+  }
+
+  function playCard(playerIndex) {
+	if (playerHand.length === 0) return;
+	// CPU 選択（ランダム）
+	const cpuIndex = Math.floor(Math.random() * cpuHand.length);
+	const playerCard = playerHand[playerIndex];
+	const cpuCard = cpuHand[cpuIndex];
+
+	// source 要素（現在の DOM から位置を取得）
+	const playerEl = document.getElementById('playerHand').children[playerIndex];
+	const cpuEl = document.getElementById('cpuHandVisual').children[cpuIndex];
+	const playerImg = playerEl ? playerEl.querySelector('img') : null;
+	const cpuImg = cpuEl ? cpuEl.querySelector('img') : null;
+
+	// destination slot 要素（現在の slot-box の位置）
+	const destPBox = document.querySelector('#lastPlayerPlayed .slot-box');
+	const destCBox = document.querySelector('#lastCpuPlayed .slot-box');
+	const fromP = playerImg ? getRect(playerImg) : null;
+	const fromC = cpuImg ? getRect(cpuImg) : null;
+	const toP = destPBox ? getRect(destPBox) : null;
+	const toC = destCBox ? getRect(destCBox) : null;
+
+	// アニメーション（存在する要素のみ animate）
+	const tasks = [];
+	if (fromP && toP) tasks.push(animateMoveImage(`d${playerCard}.jpg`, fromP, toP));
+	if (fromC && toC) tasks.push(animateMoveImage(`d${cpuCard}.jpg`, fromC, toC));
+
+	// 両アニメ完了後に結果を反映して配列を更新 -> render
+	Promise.all(tasks).then(() => {
+		// 判定して配列を更新（splice はここで実行）
+		// 先に配列から除外（再選択防止）
+		// 注意: splice は playerIndex/cpuIndex を元の配列に対して使う
+		// CPU側の index を先に削ると playerIndex に影響するため、インデックスの大小で順序を管理する
+		// （今回は playerIndex と cpuIndex は異なる配列なので順序影響なし）
+		if (playerCard > cpuCard) {
+			// 勝ち：プレイヤーが両カードを獲得
+			// 配列からカードを取り除く（手札から削除）
+			playerHand.splice(playerIndex, 1);
+			// cpuIndex は cpuHand のインデックスなのでその配列から削除
+			cpuHand.splice(cpuIndex, 1);
+			// 獲得配列へ追加
+			playerCaptured.push(playerCard, cpuCard);
+			// 効果音とログ
+			playSound('sndWin');
+			addLog(`あなた ${playerCard}  vs CPU ${cpuCard} → あなたの勝ち。両カードを獲得`);
+			lastOutcome = 'cpu'; // 負け側は cpu
+		} else if (cpuCard > playerCard) {
+			// 負け：CPUが両カードを獲得
+			playerHand.splice(playerIndex, 1);
+			cpuHand.splice(cpuIndex, 1);
+			cpuCaptured.push(playerCard, cpuCard);
+			playSound('sndLose');
+			addLog(`あなた ${playerCard}  vs CPU ${cpuCard} → CPUの勝ち。CPUが両カードを獲得`);
+			lastOutcome = 'player';
+		} else {
+			// 引き分けは両カード破棄（配列から削除のみ）
+			playerHand.splice(playerIndex, 1);
+			cpuHand.splice(cpuIndex, 1);
+			// 引き分けの効果音
+			playSound('sndDraw');
+			addLog(`あなた ${playerCard}  vs CPU ${cpuCard} → 引き分け。両カードを破棄`);
+			lastOutcome = 'both';
+		}
+
+		// 場表示を更新（lastPlayerCard/lastCpuCard は直前に出したカードを示す）
+		lastPlayerCard = playerCard;
+		lastCpuCard = cpuCard;
+
+		// render を呼んで UI を整える（残り数・獲得カード・場の表示・ログが反映される）
+		render();
+
+		// 自動プレイ中は次ターンを遅延で実行
+		if (autoPlaying && playerHand.length > 0) {
+			setTimeout(() => playCard(0), 400);
+		}
+	});
+  }
+
+  // 結果表示
+  function showResult(){
+    const p = sum(playerCaptured), c = sum(cpuCaptured);
+    // 既存の小さな結果行はそのまま表示
+    const rr = document.getElementById('resultRow');
+    const rt = document.getElementById('resultText');
+    rr.style.display = 'flex';
+    rt.innerHTML = `あなた: ${p}  —  CPU: ${c}`;
+
+    // 最終結果に応じた効果音
+    if (p > c) playSound('sndFinWin');
+    else if (c > p) playSound('sndFinLose');
+    else playSound('sndFinDraw');
+
+    // 大きなオーバーレイに表示
+    const overlay = document.getElementById('finalOverlay');
+    const title = document.getElementById('finalTitle');
+    const subtitle = document.getElementById('finalSubtitle');
+    if (p > c) title.innerHTML = '<span class="winner">あなたの勝ち！</span>';
+    else if (c > p) title.innerHTML = '<span class="loser">CPUの勝ち</span>';
+    else title.innerHTML = '<span class="tie">引き分け</span>';
+    subtitle.textContent = `最終スコア — あなた: ${p} ／ CPU: ${c}`;
+    overlay.classList.add('show');
+    overlay.setAttribute('aria-hidden','false');
+  }
+  function hideResult(){
+    // hide small result row
+    document.getElementById('resultRow').style.display = 'none';
+    // hide overlay if present
+    const overlay = document.getElementById('finalOverlay');
+    if (overlay) {
+      overlay.classList.remove('show');
+      overlay.setAttribute('aria-hidden','true');
+    }
+  }
+
+  // コントロール
+  document.getElementById('restart').onclick = () => {
+    init();
+  };
+  document.getElementById('autoPlay').onclick = (e) => {
+    autoPlaying = !autoPlaying;
+    e.target.textContent = autoPlaying ? '自動中…' : '自動プレイ';
+    e.target.classList.toggle('ghost');
+    if (autoPlaying && playerHand.length>0) {
+      // ちょっと遅延を置いて開始
+      setTimeout(() => playCard(0), 300);
+    }
+  };
+
+  // オーバーレイ内ボタン
+  document.getElementById('finalClose').onclick = () => {
+    hideResult();
+  };
+  document.getElementById('finalRestart').onclick = () => {
+    hideResult();
+    init();
+  };
+
+  // 初期化
+  init();
+</script>
+</body>
+</html>
